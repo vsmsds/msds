@@ -1,0 +1,564 @@
+
+```{r packages, message=FALSE, echo=TRUE}
+# Make sure these are installed:
+
+# install.packages("tidyverse")
+# install.packages("lubridate")
+# install.packages("geosphere")
+# install.packages("caTools")
+# install.packages("randomForest")
+# install.packages("class")
+
+library(tidyverse)
+library(lubridate)
+library(geosphere)
+library(caTools)
+library(randomForest)
+library(class)
+
+```
+
+
+## About the Data:
+
+  * ### Introduction:
+  
+    * Our our initial or primary data set contains attributes surrounding every shooting incident in New York City since the year 2006 and all the way through until the end of the prior calendar year. This data is reviewed and updated every year by the Office of Management Analysis and Planning. In general, the information includes demographics surrounding the suspect as well as the victim, location and time of incident occurance, , as well as the label - which is a binary representation for whether the incident proved to be fatal for the victim.
+    
+    * Our supporting data sets include additional information surround the police precincts such as the shape of the precinct in terms of area and length. Additionally, we will use a data set with supporting information about nearby hospitals. This data includes attributes such as facility type, borough, longitude and latitude. For our purposes, the attributes we are interested in are; [Precinct, Shape_Leng, Shape_Area, Facility Type, Borough, Latitude, Longitude]. We will be merging the data sets on Precinct and Borough respectively. We will be using hospital Latitude and Longitude ('H_Latitude' / 'H_Longitude') for distance calculation relative to incident location.
+    
+  * ### Data Attributes (Combined):
+
+    * Independent Variables / Features:
+        - INCIDENT_KEY
+        - OCCUR_DATE 
+        - OCCUR_TIME       
+        - BORO  
+        - PRECINCT
+        - JURISDICTION_CODE    
+        - LOCATION_DESC  
+        - PERP_AGE_GROUP
+        - PERP_SEX 
+        - PERP_RACE 
+        - VIC_AGE_GROUP 
+        - VIC_SEX        
+        - VIC_RACE    
+        - X_COORD_CD
+        - Y_COORD_CD   
+        - Latitude  
+        - Longitude
+        - Shape_Area
+        - Shape_Length
+        - H_Latitude
+        - H_Longitude
+    
+    * Dependent / Target Variable:
+        - STATISTICAL_MURDER_FLAG 
+
+    * Columns we are interested in:
+        - raw_dat1: [INCIDENT_KEY,OCCUR_DATE,OCCUR_TIME,BORO,PRECINCT,LOCATION_DESC,VIC_AGE_GROUP,VIC_SEX,VIC_RACE,Latitude,Longitude]
+        - raw_dat2: [Precinct,Shape_Area,Shape_Length]
+        - raw_dat3: [Facility Type,Borough,Latitude,Longitude]
+    
+## Importing Data:
+
+  First, we are going to import all the required data. Our primary data set is "raw_dat1", and supporting data is in "raw_dat2" & "raw_dat1".
+
+
+```{r import_data, message=FALSE, echo=TRUE}
+
+rd1 <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+raw_dat1 <- read_csv(rd1,col_select = c(INCIDENT_KEY,OCCUR_DATE,OCCUR_TIME,BORO,PRECINCT,LOCATION_DESC,VIC_AGE_GROUP,VIC_SEX,VIC_RACE,Latitude,Longitude,STATISTICAL_MURDER_FLAG))
+
+rd2 <- "https://data.cityofnewyork.us/api/views/kmub-vria/rows.csv?accessType=DOWNLOAD"
+raw_dat2 <- read_csv(rd2,col_select = c(Precinct,Shape_Area,Shape_Leng))
+
+rd3 <- "https://data.cityofnewyork.us/api/views/ymhw-9cz9/rows.csv?accessType=DOWNLOAD"
+raw_dat3 <- read_csv(rd3,col_select = c('Facility Type',Borough,Latitude,Longitude))
+
+```
+
+
+
+```{r, echo=TRUE}
+# Lets take a quick look at our data sets.
+
+head(raw_dat1,5)
+head(raw_dat2,5)
+head(raw_dat3,5)
+```
+
+## Cleaning Data:
+
+There are a few adjustments we need to make here:
+
+  [raw_dat1]
+
+  1. Adjust raw_dat1.OCCUR_DATE from character to a date.
+  2. Add columns hor hour and year derived form the OCCUR_DATE
+  3. Rename and convert STATISTICAL_MURDER_FLAG(TRUE/FALSE) to TARGET(1/0)
+  4. Convert TARGET to a factor type.
+  5. Create binary representation columns for categorical variables in VIC_AGE_GROUP,VIC_SEX, VIC_RACE. For LOCATION_DESC we will create columns for only the following: PVT_HOUSE, HOTEL_MOTEL, MULTI_PUB_HOU, MULTI_APT, BAR_CLUB.
+  6. Convert all categorical variables to factor type.
+  
+  [raw_dat2]
+  
+  1. Rename columns to: c(PRECINCT, AREA, LENGTH)
+  2. Merge with raw_dat1 on 'PRECINCT'
+  
+  [raw_dat3]
+  
+  1. Drop all rows with missing Latitude.
+  2. Filter for Acute Care - Facility Type.
+  3. Rename columns to: 'fType','BORO','H_Latitude','H_Longitude'.
+  4. Replacing two Acute Care hospitals manually, due to missing Lat/Long on the original data file.
+  5. Convert boroughs to upper-case to match original raw_dat1 for merge.
+  6. Check for and remove any duplicate rows.
+  7. Merge raw_dat3 with the newly created file in prior merge.
+
+```{r tidy_dat1, message=FALSE, echo=TRUE}
+
+raw_dat1 <- raw_dat1 %>%
+  mutate(OCCUR_DATE = lubridate::mdy(OCCUR_DATE),
+         YEAR = year(OCCUR_DATE),
+         HOUR = hour(OCCUR_TIME),
+         TARGET = if_else(STATISTICAL_MURDER_FLAG==TRUE,1,0),
+         VIC_SEX_M = if_else(VIC_SEX=='M',1,0),
+         PVT_HOUSE = if_else(LOCATION_DESC=='PVT_HOUSE',1,0),
+         HOTEL_MOTEL = if_else(LOCATION_DESC=='HOTEL/MOTEL',1,0),
+         MULTI_PUB_HOU = if_else(LOCATION_DESC=='MULTI DWELL - PUBLIC HOUS',1,0),
+         MULTI_APT = if_else(LOCATION_DESC=='MULTI DWELL - APT',1,0),
+         BAR_CLUB = if_else(LOCATION_DESC=='BAR/NIGHT CLUB',1,0),
+         VC_AGE_18 = if_else(VIC_AGE_GROUP=="<18",1,0),
+         VC_AGE_18_24 = if_else(VIC_AGE_GROUP=="18-24",1,0),
+         VC_AGE_25_44 = if_else(VIC_AGE_GROUP=='25_44',1,0),
+         VC_AGE_65 = if_else(VIC_AGE_GROUP=='65+',1,0))
+
+raw_dat1$MULTI_APT[is.na(raw_dat1$MULTI_APT)] <- 0
+raw_dat1$PVT_HOUSE[is.na(raw_dat1$PVT_HOUSE)] <- 0
+raw_dat1$HOTEL_MOTEL[is.na(raw_dat1$HOTEL_MOTEL)] <- 0
+raw_dat1$MULTI_PUB_HOU[is.na(raw_dat1$MULTI_PUB_HOU)] <- 0
+raw_dat1$BAR_CLUB[is.na(raw_dat1$BAR_CLUB)] <- 0
+
+clean_dat1 <- raw_dat1 %>% 
+  select(TARGET,INCIDENT_KEY,PRECINCT,OCCUR_DATE,YEAR,HOUR,BORO,Latitude,Longitude
+         ,VIC_SEX_M,PVT_HOUSE,HOTEL_MOTEL,MULTI_PUB_HOU,MULTI_APT,BAR_CLUB
+         ,VC_AGE_18,VC_AGE_18_24,VC_AGE_25_44,VC_AGE_65)
+```
+
+
+```{r, echo=TRUE}
+# Lets take a look at our cleaned primary data set.
+
+head(clean_dat1,5)
+
+```
+
+
+
+```{r tidy_dat2, message=FALSE, echo=TRUE}
+
+colnames(raw_dat2) = c('PRECINCT', 'AREA', 'LENGTH')
+
+clean_dat2 <- left_join(clean_dat1,raw_dat2,by='PRECINCT')
+
+```
+
+```{r check_dat2, echo=TRUE}
+
+head(clean_dat2,5)
+
+```
+
+
+
+```{r tidy_dat3, message=FALSE, echo=TRUE}
+raw_dat3 <- raw_dat3  %>% 
+  select('Facility Type','Borough','Latitude','Longitude') %>%
+  drop_na('Latitude')
+head(raw_dat3,5) 
+
+# Filtering for Acute Care - Facility Type
+filt1 <- raw_dat3$`Facility Type`=='Acute Care Hospital'
+raw_dat3 <- raw_dat3[filt1,]
+
+# Renaming for ease of use.
+colnames(raw_dat3) <- c('fType','BORO','H_Latitude','H_Longitude')
+
+# Adding in two Acute Care Hospitals manually, due to Lat/Long issue.
+raw_dat3 <- raw_dat3 %>% add_row(fType='Acute Care Hospital'
+                                 ,BORO='Bronx'
+                                 ,H_Latitude=40.817688484049
+                                 ,H_Longitude=-73.924200271483)
+
+raw_dat3  <- raw_dat3 %>% add_row(fType='Acute Care Hospital'
+                                  ,BORO='Queens'
+                                  ,H_Latitude=40.738710402563
+                                  ,H_Longitude=--73.878351155182)
+raw_dat3$BORO <- toupper(raw_dat3$BORO)
+# Making sure that we did not create duplicates.
+raw_dat3 <- distinct(raw_dat3)
+
+```
+
+
+```{r final_merge, echo=TRUE}
+
+# Merge into final data set.
+clean_dat3 <- left_join(clean_dat2,raw_dat3,by='BORO')
+
+```
+
+```{r check_dat3, echo=TRUE}
+
+head(clean_dat3,15)
+
+
+tail(clean_dat3,15)
+```
+
+## Transform Data
+
+  * Our final merge produced a file with duplicate incident keys. This is because some of the boroughs hold more than one Acute Care Hospital. In order to handle for this, we are going to apply the Haversine method to calculate the shortest distance between incident location and the surrounding hospitals using Latitude and Longitude of the incident and the hospitals. Finally, we retain the row in the data frame which contains the nearest hospital in relation to the incident location.
+  
+  * In order to complete this, we are going to use the 'distHaversine' function within the 'geosphere' package.
+  
+  * The new column containing the calculated shortest distance will be labeled as 'H_dist'
+  
+  * NOTE: Per the database, Staten Island does not have an Acute Care facility. This will be handled by assigning H_latitude and H_Longitude values to the closest Acute Care facility, in the closest borough [Brooklyn, (40.58655, -73.96617)]
+  
+```{r shortest_distance, echo=TRUE}
+
+#clean_dat3
+clean_dat4 <- clean_dat3 %>% 
+  mutate(H_Latitude = if_else(BORO=='STATEN ISLAND',40.58655,H_Latitude),
+         H_Longitude = if_else(BORO=='STATEN ISLAND',-73.96617,H_Longitude),
+         H_DIST = distHaversine(cbind(Longitude,Latitude),cbind(H_Longitude,H_Latitude)))
+         #H_DIST = if_else(BORO=='STATEN ISLAND',mean(clean_dat4$H_DIST, na.rm = TRUE),H_DIST))
+head(clean_dat4,5)
+
+retain_date <- as.data.frame(clean_dat3[,c('INCIDENT_KEY','OCCUR_DATE','YEAR')])
+colnames(retain_date) <- c('INCIDENT_KEY','DATE1','YEAR1')
+retain_date <- distinct(retain_date)
+
+clean_dat5 <- clean_dat4 %>%
+  select(TARGET,INCIDENT_KEY,PRECINCT,OCCUR_DATE,YEAR,HOUR,BORO,Latitude,Longitude,VIC_SEX_M
+         ,PVT_HOUSE,HOTEL_MOTEL,MULTI_PUB_HOU,MULTI_APT,BAR_CLUB
+         ,VC_AGE_18,VC_AGE_18_24,VC_AGE_25_44,VC_AGE_65,AREA,LENGTH
+         , H_DIST)%>%
+  group_by(INCIDENT_KEY) %>%
+  slice(which.min(H_DIST))
+
+clean_dat6 <- left_join(retain_date,clean_dat5,by='INCIDENT_KEY')
+# It looks like 
+clean_dat6 <- clean_dat6 %>% select(TARGET,INCIDENT_KEY,PRECINCT,OCCUR_DATE,YEAR,HOUR,BORO,Latitude,Longitude,VIC_SEX_M
+         ,PVT_HOUSE,HOTEL_MOTEL,MULTI_PUB_HOU,MULTI_APT,BAR_CLUB
+         ,VC_AGE_18,VC_AGE_18_24,VC_AGE_25_44,VC_AGE_65,AREA,LENGTH
+         , H_DIST)
+```
+
+```{r check_clean_dat6}
+# Lets check the data one more time.
+head(clean_dat6,5)
+
+```
+
+```{r}
+# Now that we confirmed our data looks good, lets only the necessary columns.
+
+clean_dat7 <- clean_dat6 %>%
+  select(TARGET,PRECINCT,YEAR,HOUR,BORO,Latitude,Longitude,VIC_SEX_M
+         ,PVT_HOUSE,HOTEL_MOTEL,MULTI_PUB_HOU,MULTI_APT,BAR_CLUB
+         ,VC_AGE_18,VC_AGE_18_24,VC_AGE_25_44,VC_AGE_65,AREA,LENGTH
+         , H_DIST) %>% 
+  mutate(
+    T1 = if_else(
+      (HOUR>=0 & HOUR<3),1,0),
+    T2 = if_else(
+      (HOUR>=3 & HOUR<6),1,0),
+    T3 = if_else(
+      (HOUR>=6 & HOUR<9),1,0),
+    T4 = if_else(
+      (HOUR>=9 & HOUR<12),1,0),
+    T5 = if_else(
+      (HOUR>=12 & HOUR<15),1,0),
+    T6 = if_else(
+      (HOUR>=15 & HOUR<18),1,0),
+    T7 = if_else(
+      (HOUR>=18 & HOUR<21),1,0),
+    T8 = if_else(
+      (HOUR>=21 & HOUR<24),1,0),
+    Tx = if_else(T1==1,'T1',
+                 if_else(T2==1,'T2',
+                         if_else(T3==1,'T3',
+                                 if_else(T4==1,'T4',
+                                         if_else(T5==1,'T5',
+                                                 if_else(T6==1,'T6',
+                                                         if_else(T7==1,'T7','T8')))))))) %>%
+  mutate_at(vars(T1,T2,T3,T4,T5,T6,T7,T8,Tx,
+                 VC_AGE_18,VC_AGE_18_24,VC_AGE_25_44,VC_AGE_65
+             ,PVT_HOUSE,HOTEL_MOTEL,MULTI_PUB_HOU,MULTI_APT,BAR_CLUB
+             ,VIC_SEX_M,TARGET),factor)
+
+
+
+
+      
+
+head(clean_dat7,5)
+
+
+# Transform all categoricals into factor type
+cat_vars = c('T1','T2','T3','T4','T5','T6','T7','T8','Tx'
+             ,'VC_AGE_18','VC_AGE_18_24','VC_AGE_25_44','VC_AGE_65'
+             ,'PVT_HOUSE','HOTEL_MOTEL','MULTI_PUB_HOU','MULTI_APT','BAR_CLUB'
+             ,'VIC_SEX_M','TARGET')
+
+
+num_vars = c('Latitude','Longitude','AREA','LENGTH','H_DIST')
+
+placeholders = c('PRECINCT','BORO','HOUR')
+
+
+```
+
+
+
+Next, we are going to split up our data set into a training and testing set in order to avoid introducing potential bias, the split will be 75% training and 25% for testing.
+
+
+```{r split_data}
+
+train_set1=clean_dat7
+# Secondary split - splitting data into training and validation
+set.seed(123)
+split_dat = sample.split(train_set1$TARGET, SplitRatio = 0.8)
+
+train_set2 = subset(train_set1, split_dat == TRUE)
+validation_set = subset(train_set1, split_dat == FALSE)
+
+# Checking proportions
+
+prop.table(table(train_set2$TARGET))
+prop.table(table(validation_set$TARGET))
+
+
+```
+
+
+## Visualize the Data
+
+  * Next, we are going to visualize our data within the training set as part of exploratory analysis.
+  
+  
+```{r, Visual_Data_Summary , echo=TRUE}
+vis_dat <- train_set2[c(placeholders,cat_vars,num_vars)]
+# Summary
+summary(vis_dat)
+
+# Structure
+str(vis_dat)
+
+
+
+```
+
+
+Lets take a quick look at Precincts and the hour of day.
+
+```{r, Precinct_Hours, echo=TRUE}
+
+viz1 <- vis_dat %>% 
+  select(TARGET,PRECINCT, HOUR) %>%
+  # We are going to filter for cases which resulted in a fatality.
+  filter(TARGET==1) %>%
+  count(PRECINCT,HOUR)
+
+# Size and color of the points will vary based on the count of incidents within that specific precinct.
+ggplot(data=viz1, aes(x=HOUR,y=PRECINCT, size=n,color=n))+
+  geom_point()+
+  labs(title='NYC Shooting Fatalities with relation to Police Precinct and Hour of Day', x='Hour of day',y='Precinct ID')
+
+
+
+```
+
+
+
+After accounting for the count of incidents by precinct and hour, we can determine that the highest concentration of fatal shootings actually takes place in precinct range of 25-85. An interesting observation here is in the difference of time ranges. Precincts in the range of 40-80 experience a relatively safe time frame of only a few hours, between 8am and 10am. Whereas precincts in the range of 25-40 experience very little fatal activity between the hours of 6am and 3pm, however, shooting fatalities pick right back up after 3pm and continue until 5am, which is when it starts to cool down. Another interesting observation here would be the increase in fatalities between the hours of approximately 4pm and 5am, this is especially true for precincts in the range of 100-125.
+
+
+```{r, Precinct_HDIST, echo=TRUE}
+
+viz2 <- vis_dat %>% 
+  select(TARGET,PRECINCT, H_DIST, AREA) %>%
+  # We are going to filter for cases which resulted in a fatality.
+  #filter(TARGET==0) %>%
+  #count(PRECINCT,HOUR)
+  mutate(t_pos = if_else(TARGET==1,1,0))%>%
+  mutate(t_neg = if_else(TARGET==1,0,1))%>%
+  group_by(PRECINCT)%>%
+  summarize(
+    H_DIST_avr = mean(H_DIST),
+    AREA_avr = mean(AREA),
+    pos_sum = sum(t_pos),
+    neg_sum = sum(t_neg),
+    tot_sum = pos_sum+neg_sum,
+    pos_percent = pos_sum/tot_sum)
+
+  #mutate(pos_percent_z = (pos_percent-mean(pos_percent))/sd(pos_percent))
+head(viz2,5)
+
+# Size and color of the points will vary based on the count of incidents within that specific precinct.
+p1 = ggplot(data=viz2,aes(y=H_DIST_avr,x=PRECINCT, size=pos_percent,color=pos_percent))+
+  geom_point()+
+  labs(x='Precinct ID',y='Average Distance to the nearest Acute Care Hospital ')+theme_bw()
+
+p2 = ggplot(data=viz2,aes(x=PRECINCT,y=AREA_avr))+
+  geom_point()+
+  labs(y='Average Area of Police Precinct',x='Precinct ID')+
+    theme_bw()
+
+
+p3 = ggplot(data=viz2,aes(x=PRECINCT,y=pos_percent))+
+  geom_point()+
+  stat_smooth(method="lm", se=TRUE, formula=y~poly(x,6,raw=TRUE),color='red')+
+  labs(y='Fatalities / Total Shootings',x='Precinct ID')+theme_bw()
+
+
+p1
+p2
+p3
+
+
+```
+
+Here we can see the percentage of shooting victims who did not survive increases in precincts within a range of 100-125.
+One potential explanatory variables in determining whether a victim lives or dies could be tied to the hospitals located within or around the precinct in question.
+This can be observed in precinct ID's within the range of 100-125, where the average distance to the nearest Acute Care Hospital is 2-3x longer relative to precincts in lower ranges.
+
+
+```{r}
+vis_dat1 <- vis_dat %>% 
+  mutate(TAR_POS = if_else(TARGET==1,1,0))%>%
+  mutate(TAR_NEG = if_else(TARGET==0,1,0))%>%
+  group_by(BORO,Tx)%>%
+  summarize(
+    tar_pos = sum(TAR_POS),
+    tar_neg = sum(TAR_NEG),
+    tot_count = (tar_pos+tar_neg),
+    pos_rat = tar_pos/tot_count)
+head(vis_dat1,5)
+
+```
+
+
+
+```{r}
+#vis_datx <- train_set2[c(placeholders,cat_vars,num_vars)]
+vis_datx1 <- vis_dat1 %>% select(BORO,Tx,tot_count)
+head(vis_datx1,5)
+
+cat_hour = as.factor(vis_datx1$Tx)
+
+ggplot(data=vis_datx1, aes(x=cat_hour,y=tot_count, color=cat_hour)) +
+  geom_boxplot()+scale_color_brewer(palette = "PuOr")+
+  #geom_jitter(shape=1,position=(position_jitter(0.0)))+
+  labs(title = 'NYC Most Active Shooting Hours (2006 - 2021)'
+       ,y='Total Shootings',x='Incidents Time block (3hr incr. [0-24])')
+
+```
+
+
+```{r}
+
+vis_datx3 <- vis_dat %>% 
+  select(PRECINCT,BORO,TARGET,AREA,H_DIST,LENGTH,Tx) %>%
+  mutate(tar = if_else(TARGET==1,'YES','NO')) %>%
+  mutate(YY = if_else(TARGET==1,1,0)) %>%
+  mutate(NN = if_else(TARGET==1,0,1)) %>%
+  #filter(BORO == 'MANHATTAN'
+  group_by(Tx,PRECINCT) %>%
+  summarize(#anss = if_else(TARGET==1,"YY","NN"),
+            sum_yes = sum(YY),
+            sum_no = sum(NN),
+            tots = sum_yes+sum_no,
+            yes_perc = sum_yes/tots,
+            H_DIST_avr = mean(H_DIST),
+            AREA_avr = mean(AREA))
+#vis_datx3
+
+t1 <- vis_datx3[,c("Tx","AREA_avr","H_DIST_avr","yes_perc")]
+
+
+colnames(t1) <- c("Tx", "AREA_avr","H_DIST_avr","yes_perc")
+cat_var = as.factor(t1$Tx)
+value_var = t1$yes_perc
+
+plot1<- ggplot(data=t1, aes(x=cat_var,y=value_var, color=cat_var)) +
+  geom_boxplot()+
+  scale_color_brewer(palette = 'PuOr')+
+  labs(title = 'NYC Shootings Most Fatal Hours (2006 - 2021)'
+       ,y='Fatalities / Total Incidents'
+       ,x='Incidents Time block (3hr incr. [0-24])')
+plot1
+
+```
+
+One of the factors we could further explore is the time of day the shootings took place. Here we can see that the least active time period for shooters in New York City is between the hours of 6am and 12pm as indicated by time blocks 'T3' and 'T4' in the model above. These time blocks also carry a much larger interquartile range when it comes to shooting victims who did not survive as seen in the second graph.
+
+* Note: Each 'T' in this model is a 3 hour increment starting from 0 and through the 24th hour.
+
+## Modeling Data
+
+  * Now we will see if we can build a prediction model given the data we have so far.
+  * We are going to be using the random forest algorithm as our approach for this model to take advantage of the "Wisdom of the crowds" concept where the collective opinion of many decision trees should yield a relatively better result than relying on a single tree. Furthermore, a random forest approach allows us to take advantage of feature importance in determining which of the variables are actually relevant to the survival of a shooting victim.
+  
+    * In taking this approach we are also reducing over-fit bias by averaging the result of many decision trees.
+    
+    
+```{r modeling_data, echo=TRUE}
+
+set.seed(123)
+selected_vars = c('TARGET','T1','T2','T3','T4','T5','T6','T7','T8','Tx'
+             ,'VC_AGE_18','VC_AGE_18_24','VC_AGE_25_44','VC_AGE_65'
+             ,'PVT_HOUSE','HOTEL_MOTEL','MULTI_PUB_HOU','MULTI_APT','BAR_CLUB'
+             ,'VIC_SEX_M','Latitude','Longitude','AREA','LENGTH','H_DIST')
+
+trainingset <- train_set2%>%select(selected_vars)
+
+rf <- randomForest(TARGET~.,data = trainingset)
+
+importance(rf)
+print(rf)
+
+validset<-validation_set%>%select(selected_vars)
+pred = predict(rf,newdata=validset[-1])
+table(validset[,1],pred)
+
+accuracy=mean(validset[,1]==pred)
+accuracy
+
+```
+
+
+So it looks like our top 6 most important variables here would be:
+
+  1. (H_DIST): Distance to nearest Acute Care Hospital
+  2. (Latitude): Latitude of the incident location.
+  3. (Longitude): Longitude of the incident location.
+  4. (LENGTH): Length of police precinct
+  5. (AREA): Area of police precinct
+  6. (Tx): Time of day increments
+
+Using all of the variables, our random forest model achieved accuracy of approximately 82.49% during training and 82.51% when tested against the testing set.
+
+Now we are going to repeat the process one more time but this time only using the top 6 features.
+
+
+## Conclusion
+
+There is an evident bias stemming from the imbalance in the positive cases and a lot more work is needed in terms of transformations and model tuning. We also cannot rule out the value of other features within the feature set and will need to dive deeper into the iterative process of modeling, transforming, and visualizing in order to improve our model performance. 
+
+
+
